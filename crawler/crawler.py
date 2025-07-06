@@ -1,58 +1,145 @@
-import hashlib, json, os, requests, difflib, datetime as dt
-from bs4 import BeautifulSoup
+#!/usr/bin/env python3
+"""
+USCIS-Changes crawler
+---------------------
 
-SOURCES = {
-    "news":  "https://www.uscis.gov/newsroom/all-news",
-    "alert": "https://www.uscis.gov/newsroom/alerts",
-    "policy": "https://www.uscis.gov/policy-manual/updates"
+*   Checks a small set of USCIS pages for changes
+*   Saves raw HTML snapshots in /snapshots/{source}/YYYY-MM-DD.html
+*   Generates side-by-side HTML diffs in docs/changes/
+*   Re-writes docs/index.html with the 50 most recent diffs
+
+Run manually or on a schedule inside GitHub Actions.
+"""
+
+from __future__ import annotations
+import difflib
+import hashlib
+import json
+import os
+import sys
+import datetime as dt
+from pathlib import Path
+from typing import Dict, List
+
+import requests
+from bs4 import BeautifulSoup   # only needed if you later parse titles
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+
+SOURCES: Dict[str, str] = {
+    "news":   "https://www.uscis.gov/newsroom/all-news",
+    "alerts": "https://www.uscis.gov/newsroom/alerts",
+    "policy": "https://www.uscis.gov/policy-manual/updates",
 }
 
-def fetch(url):
+OUTPUT_DIR  = Path("docs")           # GitHub Pages serves /docs
+CHANGES_DIR = OUTPUT_DIR / "changes" # HTML diffs live here
+SNAP_DIR    = Path("snapshots")      # Raw HTML archive
+INDEX_PATH  = Path("index.json")     # Stores last hashes per source
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+def fetch(url: str) -> str:
+    """Return raw HTML from a page, raising for non-200."""
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     return r.text
 
-def extract_items(html):
-    soup = BeautifulSoup(html, "html.parser")
-    return [
-        {
-            "title": a.get_text(strip=True),
-            "url": a["href"],
-            "date": dt.datetime.utcnow().isoformat()  # USCIS already prints a date; parse if you prefer
-        }
-        for a in soup.select("a.uscis-card__title, a.card-title")  # tweak per page
-    ]
+def sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
 
-def save_snapshot(src, html):
-    today = dt.date.today().isoformat()
-    os.makedirs(f"snapshots/{src}", exist_ok=True)
-    with open(f"snapshots/{src}/{today}.html", "w", encoding="utf-8") as f:
-        f.write(html)
+def diff_html(old: str, new: str, fromdesc: str, todesc: str) -> str:
+    """Return an HTML side-by-side diff."""
+    return difflib.HtmlDiff().make_file(
+        old.splitlines(), new.splitlines(),
+        fromdesc=fromdesc, todesc=todesc, context=True, numlines=2
+    )
 
-def diff(old, new):
-    return difflib.HtmlDiff().make_file(old.splitlines(), new.splitlines(),
-                                        fromdesc="previous", todesc="current")
-def write_home(changes):
-    tpl = ['<h1>Latest USCIS Changes</h1><ul>']
-    for c in sorted(changes, key=lambda x: x['ts'], reverse=True)[:50]:
-        tpl.append(f"<li>{c['ts'][:10]} – <a href='{c['path']}'>{c['title']}</a></li>")
-    tpl.append('</ul>')
-    open('docs/index.html','w').write('\n'.join(tpl))
+def write_home():
+    """Rebuild docs/index.html from files currently in docs/changes/."""
+    rows: List[str] = []
+    for html_file in sorted(CHANGES_DIR.glob("*.html"), key=os.path.getmtime, reverse=True)[:50]:
+        mtime = dt.datetime.fromtimestamp(html_file.stat().st_mtime, dt.timezone.utc)
+        label = html_file.stem.replace("-", " ", 1)   # e.g. 'news-20250615T123456'
+        rows.append(f"<li>{mtime.date()} – <a href='changes/{html_file.name}'>{label}</a></li>")
 
-if __name__ == "__main__":
-    index = json.load(open("index.json")) if os.path.exists("index.json") else {}
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    index_html = OUTPUT_DIR / "index.html"
+    index_html.write_text(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>USCIS Changes</title></head><body>"
+        "<h1>Latest USCIS Changes</h1><ul>"
+        + "\n".join(rows) +
+        "</ul></body></html>",
+        encoding="utf-8"
+    )
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+
+def main(debug: bool = False) -> None:
+    CHANGES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Load last hashes (if any)
+    if INDEX_PATH.exists():
+        with INDEX_PATH.open() as f:
+            index: Dict[str, str] = json.load(f)
+    else:
+        index = {}
+
+    changed_this_run = False
+
     for name, url in SOURCES.items():
         html = fetch(url)
-        digest = hashlib.sha256(html.encode()).hexdigest()
-        if index.get(name) != digest:
-            # new content detected
-            old_html = open(f"snapshots/{name}.last.html", "r", encoding="utf-8").read() if os.path.exists(f"snapshots/{name}.last.html") else ""
-            with open(f"snapshots/{name}.last.html", "w", encoding="utf-8") as f:
-                f.write(html)
-            change_html = diff(old_html, html)
-            path = f"docs/changes/{name}-{dt.datetime.utcnow().strftime('%Y%m%d%H%M%S')}.html"
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            open(path, "w", encoding="utf-8").write(change_html)
-            index[name] = digest
-    write_home() 
-    json.dump(index, open("index.json", "w"), indent=2)
+        digest = sha256(html)
+
+        if debug:
+            print(f"[{name}] digest {digest} (prev {index.get(name)})")
+
+        if index.get(name) == digest:
+            continue  # no update
+
+        # New content detected -------------------------------------------------
+        changed_this_run = True
+
+        # Load previous snapshot (if any) to generate diff
+        last_snap_path = SNAP_DIR / name / "latest.html"
+        old_html = last_snap_path.read_text(encoding="utf-8") if last_snap_path.exists() else ""
+
+        # Save new snapshot
+        date_stamp = utc_now().date().isoformat()
+        daily_snap = SNAP_DIR / name / f"{date_stamp}.html"
+        daily_snap.parent.mkdir(parents=True, exist_ok=True)
+        daily_snap.write_text(html, encoding="utf-8")
+        last_snap_path.write_text(html, encoding="utf-8")
+
+        # Build & save diff page
+        ts = utc_now().strftime("%Y%m%dT%H%M%S")
+        diff_path = CHANGES_DIR / f"{name}-{ts}.html"
+        diff_path.write_text(diff_html(old_html, html, "previous", "current"), encoding="utf-8")
+
+        if debug:
+            print(f"  → change saved to {diff_path}")
+
+        # Update hash
+        index[name] = digest
+
+    # Write updated index.json (even if no change so Git hash tracks history)
+    INDEX_PATH.write_text(json.dumps(index, indent=2))
+
+    # Rebuild the landing page every run
+    write_home()
+
+    if debug:
+        print("Done. Any changes:", changed_this_run)
+
+if __name__ == "__main__":
+    main(debug="--debug" in sys.argv)
