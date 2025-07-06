@@ -32,6 +32,12 @@ def save_snapshot(src, html):
 def diff(old, new):
     return difflib.HtmlDiff().make_file(old.splitlines(), new.splitlines(),
                                         fromdesc="previous", todesc="current")
+def write_home(changes):
+    tpl = ['<h1>Latest USCIS Changes</h1><ul>']
+    for c in sorted(changes, key=lambda x: x['ts'], reverse=True)[:50]:
+        tpl.append(f"<li>{c['ts'][:10]} – <a href='{c['path']}'>{c['title']}</a></li>")
+    tpl.append('</ul>')
+    open('docs/index.html','w').write('\n'.join(tpl))
 
 if __name__ == "__main__":
     index = json.load(open("index.json")) if os.path.exists("index.json") else {}
@@ -44,8 +50,9 @@ if __name__ == "__main__":
             with open(f"snapshots/{name}.last.html", "w", encoding="utf-8") as f:
                 f.write(html)
             change_html = diff(old_html, html)
-            path = f"site/changes/{name}-{dt.datetime.utcnow().strftime('%Y%m%d%H%M%S')}.html"
+            path = f"docs/changes/{name}-{dt.datetime.utcnow().strftime('%Y%m%d%H%M%S')}.html"
             os.makedirs(os.path.dirname(path), exist_ok=True)
             open(path, "w", encoding="utf-8").write(change_html)
             index[name] = digest
+    write_home() 
     json.dump(index, open("index.json", "w"), indent=2)
