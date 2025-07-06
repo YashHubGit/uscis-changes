@@ -19,3 +19,12 @@ jobs:
           git add .
           git commit -m "auto: detected new USCIS change $(date -u)" || echo "no changes"
           git push
+    - name: Copy site to gh-pages branch
+      if: github.ref == 'refs/heads/main'
+      run: |
+        git worktree add /tmp/gh-pages gh-pages || true
+        rsync -a --delete site/ /tmp/gh-pages/
+        cd /tmp/gh-pages
+        git add .
+        git commit -m "deploy: $(date -u)" || true
+        git push origin gh-pages
