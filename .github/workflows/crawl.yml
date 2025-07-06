@@ -1,0 +1,21 @@
+name: USCIS Changes
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install beautifulsoup4 requests
+      - run: python crawler.py
+      - name: Commit & deploy
+        run: |
+          git config user.name "uscis-bot"
+          git config user.email "uscis-bot@example.com"
+          git add .
+          git commit -m "auto: detected new USCIS change $(date -u)" || echo "no changes"
+          git push
