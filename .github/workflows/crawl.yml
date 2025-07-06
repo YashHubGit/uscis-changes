@@ -49,3 +49,11 @@ jobs:
           git add .
           git commit -m "deploy: $(date -u)" || echo "No changes in docs"
           git push origin gh-pages
+      - name: Install dependencies
+        run: pip install --upgrade pip requests beautifulsoup4 openai        
+
+      - name: Run crawler
+        env:                                                                 # pass the key in
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python crawler/crawler.py
+
