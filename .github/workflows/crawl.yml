@@ -28,3 +28,10 @@ jobs:
         git add .
         git commit -m "deploy: $(date -u)" || true
         git push origin gh-pages
+- uses: actions/setup-python@v5
+  with: { python-version: "3.12" }
+- run: pip install requests beautifulsoup4
+- run: python crawler/crawler.py
+- run: git add docs snapshots index.json && \
+       git commit -m "auto: crawl $(date -u)" || echo "no diff"
+- run: git push
